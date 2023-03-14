@@ -1,156 +1,150 @@
 #[cfg(not(feature = "library"))]
-use cosmwasm_std::entry_point;
-use cosmwasm_std::{to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult};
-use cw2::set_contract_version;
+pub mod contract {
+  // version info for migration info
+  use super::*;
+  const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+  const CONTRACT_NAME: &str = "crates.io:cw-template";
+  #[cfg(not(feature = "library"))]
+  use cosmwasm_std::entry_point;
+  use cosmwasm_std::{ to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult };
+  use cw2::set_contract_version;
 
-use crate::error::ContractError;
-use crate::msg::{ExecuteMsg, GetCountResponse, InstantiateMsg, QueryMsg};
-use crate::state::{State, STATE};
+  use crate::error::ContractError;
+  use crate::msg::{ ExecuteMsg, InstantiateMsg };
+  use crate::state::{ Config, CONFIG };
 
-// version info for migration info
-const CONTRACT_NAME: &str = "crates.io:cw-template";
-const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+  #[entry_point]
+  pub fn instantiate(deps: DepsMut, _env: Env, info: MessageInfo, msg: InstantiateMsg) -> Result<Response, ContractError> {
+    let total_weight = msg.voters
+      .iter()
+      .map(|voter| voter.weight)
+      .sum();
 
-#[cfg_attr(not(feature = "library"), entry_point)]
-pub fn instantiate(
-    deps: DepsMut,
-    _env: Env,
-    info: MessageInfo,
-    msg: InstantiateMsg,
-) -> Result<Response, ContractError> {
-    let state = State {
-        count: msg.count,
-        owner: info.sender.clone(),
+    let config = Config {
+      max_voting_period: msg.max_voting_period,
+      threshold: msg.threshold,
+      total_weight,
     };
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
-    STATE.save(deps.storage, &state)?;
 
-    Ok(Response::new()
-        .add_attribute("method", "instantiate")
-        .add_attribute("owner", info.sender)
-        .add_attribute("count", msg.count.to_string()))
-}
+    CONFIG.save(deps.storage, &config)?;
+    Ok(Response::default())
+  }
 
-#[cfg_attr(not(feature = "library"), entry_point)]
-pub fn execute(
-    deps: DepsMut,
-    _env: Env,
-    info: MessageInfo,
-    msg: ExecuteMsg,
-) -> Result<Response, ContractError> {
+  #[entry_point]
+  pub fn execute(deps: DepsMut, _env: Env, info: MessageInfo, msg: ExecuteMsg) -> Result<Response, ContractError> {
     match msg {
-        ExecuteMsg::Increment {} => execute::increment(deps),
-        ExecuteMsg::Reset { count } => execute::reset(deps, info, count),
+      ExecuteMsg::CreateProposal { title, description, msgs } => { unimplemented!() }
+      ExecuteMsg::Vote { proposal_id, vote } => { unimplemented!() }
+      ExecuteMsg::ExecuteProposal { proposal_id } => { unimplemented!() }
+      ExecuteMsg::CloseProposal { proposal_id } => { unimplemented!() }
     }
+  }
+  //   #[entry_point]
+  //   pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+  //     match msg {
+  //       QueryMsg::GetCount {} => to_binary(&query::count(deps)?),
+  //     }
+  //   }
 }
 
 pub mod execute {
-    use super::*;
+  use cosmwasm_std::{ DepsMut, MessageInfo, Response, Env, ensure };
+  use cw3::{ Proposal, DepositInfo, Ballot };
+  use cw_utils::Expiration;
 
-    pub fn increment(deps: DepsMut) -> Result<Response, ContractError> {
-        STATE.update(deps.storage, |mut state| -> Result<_, ContractError> {
-            state.count += 1;
-            Ok(state)
-        })?;
+  use crate::{ error::ContractError, state::{ PROPOSALS, next_id, CONFIG, VOTERS, BALLOTS }, helpers::qualified_to_vote };
 
-        Ok(Response::new().add_attribute("action", "increment"))
+  pub fn create_proposal(
+    mut deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    title: String,
+    description: String,
+    deposit_info: Option<DepositInfo>,
+    expires: Option<Expiration>
+  ) -> Result<Response, ContractError> {
+    ensure!(qualified_to_vote(deps.as_ref(), &info.clone().sender), ContractError::Unauthorized {});
+    let voter_weight = VOTERS.load(deps.branch().storage, info.clone().sender)?;
+    let cfg = CONFIG.load(deps.storage)?;
+    let start_height = env.block.height;
+    let max_period = cfg.max_voting_period.after(&env.block);
+
+    let prop = Proposal {
+      title,
+      description,
+      start_height,
+      msgs: vec![],
+      total_weight: cfg.total_weight,
+      threshold: cfg.threshold,
+      votes: cw3::Votes { yes: 1, no: 0, abstain: 0, veto: 0 },
+      status: cw3::Status::Open,
+      proposer: info.clone().sender,
+      deposit: deposit_info,
+      expires: expires.unwrap_or(max_period),
+    };
+    let id = next_id(deps.storage)?;
+    PROPOSALS.save(deps.storage, id, &prop)?;
+
+    let ballot: Ballot = Ballot { weight: voter_weight, vote: cw3::Vote::Yes };
+    BALLOTS.save(deps.storage, (id, &info.clone().sender), &ballot)?;
+
+    Ok(Response::default())
+  }
+
+  pub fn execute_vote(
+    mut deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    proposal_id: u64,
+    vote: cw3::Vote
+  ) -> Result<Response, ContractError> {
+    ensure!(qualified_to_vote(deps.as_ref(), &info.clone().sender), ContractError::Unauthorized {});
+    let voter_weight = VOTERS.load(deps.branch().storage, info.clone().sender)?;
+
+    let mut prop = PROPOSALS.load(deps.storage, proposal_id)?;
+
+    if prop.expires.is_expired(&env.clone().block) {
+      return Err(ContractError::Expired {});
     }
+    prop.votes.add_vote(vote, voter_weight);
+    prop.update_status(&env.block);
+    PROPOSALS.save(deps.branch().storage, proposal_id, &prop)?;
+    // prop.votes.add_vote(vote, weight)
+    Ok(Response::default())
+  }
 
-    pub fn reset(deps: DepsMut, info: MessageInfo, count: i32) -> Result<Response, ContractError> {
-        STATE.update(deps.storage, |mut state| -> Result<_, ContractError> {
-            if info.sender != state.owner {
-                return Err(ContractError::Unauthorized {});
-            }
-            state.count = count;
-            Ok(state)
-        })?;
-        Ok(Response::new().add_attribute("action", "reset"))
-    }
+  pub fn close_proposal(mut deps: DepsMut, env: Env, info: MessageInfo, proposal_id: u64) -> Result<Response, ContractError> {
+    let mut prop = PROPOSALS.load(deps.as_ref().storage, proposal_id)?;
+    ensure!(prop.proposer == info.sender, ContractError::Unauthorized {});
+    ensure!(prop.status == cw3::Status::Passed, ContractError::PassedProposal {});
+    ensure!(prop.expires.is_expired(&env.block), ContractError::UnexpiredProposal {});
+
+    prop.status = cw3::Status::Rejected;
+    PROPOSALS.save(deps.storage, proposal_id, &prop)?;
+    Ok(Response::default())
+  }
+
+  pub fn execute_proposal(deps: DepsMut, env: Env, proposal_id: u64) -> Result<Response, ContractError> {
+    let mut prop = PROPOSALS.load(deps.storage, proposal_id)?;
+    prop.update_status(&env.block);
+    ensure!(prop.status == cw3::Status::Passed, ContractError::PassedProposal {});
+    ensure!(!prop.expires.is_expired(&env.block), ContractError::ExpiredProposal {});
+
+    prop.status = cw3::Status::Executed;
+    PROPOSALS.save(deps.storage, proposal_id, &prop)?;
+
+    Ok(Response::default().add_messages(prop.msgs))
+  }
 }
 
-#[cfg_attr(not(feature = "library"), entry_point)]
-pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
-    match msg {
-        QueryMsg::GetCount {} => to_binary(&query::count(deps)?),
-    }
-}
+// pub mod query {
+//   use cosmwasm_std::{ Deps, StdResult };
 
-pub mod query {
-    use super::*;
-
-    pub fn count(deps: Deps) -> StdResult<GetCountResponse> {
-        let state = STATE.load(deps.storage)?;
-        Ok(GetCountResponse { count: state.count })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
-    use cosmwasm_std::{coins, from_binary};
-
-    #[test]
-    fn proper_initialization() {
-        let mut deps = mock_dependencies();
-
-        let msg = InstantiateMsg { count: 17 };
-        let info = mock_info("creator", &coins(1000, "earth"));
-
-        // we can just call .unwrap() to assert this was a success
-        let res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        // it worked, let's query the state
-        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetCount {}).unwrap();
-        let value: GetCountResponse = from_binary(&res).unwrap();
-        assert_eq!(17, value.count);
-    }
-
-    #[test]
-    fn increment() {
-        let mut deps = mock_dependencies();
-
-        let msg = InstantiateMsg { count: 17 };
-        let info = mock_info("creator", &coins(2, "token"));
-        let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        // beneficiary can release it
-        let info = mock_info("anyone", &coins(2, "token"));
-        let msg = ExecuteMsg::Increment {};
-        let _res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        // should increase counter by 1
-        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetCount {}).unwrap();
-        let value: GetCountResponse = from_binary(&res).unwrap();
-        assert_eq!(18, value.count);
-    }
-
-    #[test]
-    fn reset() {
-        let mut deps = mock_dependencies();
-
-        let msg = InstantiateMsg { count: 17 };
-        let info = mock_info("creator", &coins(2, "token"));
-        let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
-
-        // beneficiary can release it
-        let unauth_info = mock_info("anyone", &coins(2, "token"));
-        let msg = ExecuteMsg::Reset { count: 5 };
-        let res = execute(deps.as_mut(), mock_env(), unauth_info, msg);
-        match res {
-            Err(ContractError::Unauthorized {}) => {}
-            _ => panic!("Must return unauthorized error"),
-        }
-
-        // only the original creator can reset the counter
-        let auth_info = mock_info("creator", &coins(2, "token"));
-        let msg = ExecuteMsg::Reset { count: 5 };
-        let _res = execute(deps.as_mut(), mock_env(), auth_info, msg).unwrap();
-
-        // should now be 5
-        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetCount {}).unwrap();
-        let value: GetCountResponse = from_binary(&res).unwrap();
-        assert_eq!(5, value.count);
-    }
-}
+//   use crate::msg::{ GetCountResponse };
+//   use crate::state::{ STATE };
+//   pub fn count(deps: Deps) -> StdResult<GetCountResponse> {
+//     let state = STATE.load(deps.storage)?;
+//     Ok(GetCountResponse { count: state.count })
+//   }
+// }

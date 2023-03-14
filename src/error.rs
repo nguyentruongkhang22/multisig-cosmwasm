@@ -3,11 +3,18 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ContractError {
-    #[error("{0}")]
-    Std(#[from] StdError),
+  #[error("{0}")] Std(#[from] StdError),
 
-    #[error("Unauthorized")]
-    Unauthorized {},
-    // Add any other custom errors you like here.
-    // Look at https://docs.rs/thiserror/1.0.21/thiserror/ for details.
+  #[error("Unauthorized")] Unauthorized {},
+
+  #[error("Expired")] Expired {},
+
+  #[error("Passed proposal")] PassedProposal {},
+
+  #[error("Proposal is not expired")] UnexpiredProposal {},
+
+  #[error("Proposal is expired")] ExpiredProposal {},
+
+  // Add any other custom errors you like here.
+  // Look at https://docs.rs/thiserror/1.0.21/thiserror/ for details.
 }
