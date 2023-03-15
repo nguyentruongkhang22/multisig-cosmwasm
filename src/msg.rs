@@ -1,7 +1,7 @@
-use cosmwasm_schema::{ cw_serde, QueryResponses };
-use cosmwasm_std::CosmosMsg;
-use cw3::Vote;
-use cw_utils::{ Threshold, Duration };
+use cosmwasm_schema::{ cw_serde };
+use cosmwasm_std::{ CosmosMsg, Addr };
+use cw3::{ Vote, DepositInfo };
+use cw_utils::{ Threshold, Duration, Expiration };
 
 use crate::state::Voter;
 
@@ -19,6 +19,8 @@ pub enum ExecuteMsg {
     title: String,
     description: String,
     msgs: Vec<CosmosMsg>,
+    deposit_info: Option<DepositInfo>,
+    expires: Option<Expiration>,
   },
   // Vote casts a vote on a proposal
   Vote {
@@ -33,17 +35,19 @@ pub enum ExecuteMsg {
   CloseProposal {
     proposal_id: u64,
   },
+
+  RemoveVoter {
+    voter: Addr,
+  },
 }
 
+// #[derive(QueryResponses)]
 #[cw_serde]
-#[derive(QueryResponses)]
 pub enum QueryMsg {
   // GetCount returns the current count as a json-encoded number
-  #[returns(GetCountResponse)] GetCount {},
-}
+  GetProposal {
+    proposal_id: u64,
+  },
 
-// We define a custom struct for each query response
-#[cw_serde]
-pub struct GetCountResponse {
-  pub count: i32,
+  GetCurrentId {},
 }
